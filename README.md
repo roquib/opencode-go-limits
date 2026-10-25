@@ -12,7 +12,41 @@ authoritative `slug` (model ID) for use with `opencode -m opencode-go/<slug>`.
 An `Alt+M` model picker (reads `~/.config/usages_limit/models.toml`) that
 lists every Go-plan model with its 5h request budget and full
 `opencode-go/<slug>` ID, sorted highest-limit first — pick the strongest
-model you can afford before hitting a cap:
+model you can afford before hitting a cap.
+
+### Set up Alt+M (zsh)
+
+This repo only writes the TOML. The picker is the companion binary
+`opencode-model-picker` plus a ZLE widget:
+
+```bash
+# 1. Picker binary reads the TOML via fzf — install it first
+#    (requires fzf: https://github.com/junegunn/fzf)
+~/.local/bin/opencode-model-picker --list   # should print models
+
+# 2. Source the widget (after oh-my-zsh / fzf in ~/.zshrc)
+[[ -f "$HOME/dots/zsh/functions/opencode-model.zsh" ]] \
+  && source "$HOME/dots/zsh/functions/opencode-model.zsh"
+
+# 3. Reload and use
+exec zsh
+# Press Alt+M → fzf picker, Enter runs `opencode --model <picked>`
+# Or without the keybinding: omodel --exec
+```
+
+The widget registers itself with:
+
+```zsh
+zle -N _omodel_widget
+bindkey '^[m' _omodel_widget
+bindkey '\em' _omodel_widget
+```
+
+(`^[m` / `\em` is Alt+M. In some terminals Alt+M arrives as `^[m` —
+if it does nothing, check `showkey -a` or remap your terminal's
+Meta/Alt key.)
+
+Once bound, it looks like this:
 
 ![Alt+M picker showing top models with per-5h limits](assets/choose-your-top-models.png)
 
