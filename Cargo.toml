@@ -2,6 +2,11 @@
 name = "opencode-scraper"
 version = "0.1.0"
 edition = "2021"
+description = "Scrapes OpenCode Go model usage limits into a local TOML snapshot"
+license = "MIT"
+repository = "https://github.com/roquib/opencode-scraper"
+keywords = ["opencode", "scraper", "usage-limits"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["blocking"] }
