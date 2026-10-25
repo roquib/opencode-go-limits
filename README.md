@@ -18,6 +18,15 @@ authoritative `slug` (model ID) for use with `opencode -m opencode-go/<slug>`.
 This builds the release binary, installs it to `~/.local/bin/opencode-go-limits`,
 and adds an hourly cron job (logs to `~/.local/share/opencode-go-limits.log`).
 
+> Requires `~/.local/bin` on your `PATH`. Check with
+> `echo $PATH | grep -q "$HOME/.local/bin" && echo OK || echo MISSING`.
+> If missing, add it once:
+>
+> ```bash
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+> # zsh: echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+> ```
+
 ## Usage
 
 ```bash
