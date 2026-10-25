@@ -7,49 +7,27 @@ The snapshot lives at `~/.config/usages_limit/models.toml`, keyed by date
 (keeps the last 3 days). Each model entry carries the display `name` plus the
 authoritative `slug` (model ID) for use with `opencode -m opencode-go/<slug>`.
 
-## What this gives you
+## Features
 
-An `Alt+M` model picker (reads `~/.config/usages_limit/models.toml`) that
-lists every Go-plan model with its 5h request budget and full
-`opencode-go/<slug>` ID, sorted highest-limit first — pick the strongest
-model you can afford before hitting a cap.
+- **Hourly snapshot** — scrapes `https://opencode.ai/docs/go/` and writes
+  `~/.config/usages_limit/models.toml` (keeps the last 3 days, keyed by date).
+- **Go-plan scoping** — reads the `go` requests panel (`#go-requests-panel-go`,
+  ~3x below `go-plus`), with fallback to any
+  `Model | Requests per 5 hours | ...` table on older page layouts.
+- **Authoritative slugs** — resolves each display name through the Endpoints
+  table (`Model | Model ID`) to the exact `opencode-go/<slug>` ID, with
+  normalization (promo suffixes, `MiMo V2.5` vs `MiMo-V2.5`) and prefix matching.
+- **Promo & Unlimited aware** — promo cells with two figures (base + 4x boost)
+  record the max; `Unlimited`/`∞` windows serialize as `"Unlimited"`.
+- **Sorted output** — models sorted by 5h limit descending, `Unlimited` first.
+- **Two modes** — `--once` for a single scrape; no flag loops hourly.
+  `install.sh` wires the hourly cron job (logs to
+  `~/.local/share/opencode-go-limits.log`).
 
-### Set up Alt+M (zsh)
-
-This repo only writes the TOML. The picker is the companion binary
-[`opencode-model-picker`](https://github.com/roquib/opencode-model-picker)
-plus a ZLE widget:
-
-```bash
-# 1. Picker binary reads the TOML via fzf — install it first
-#    (requires fzf: https://github.com/junegunn/fzf)
-~/.local/bin/opencode-model-picker --list   # should print models
-
-# 2. Source the widget (after oh-my-zsh / fzf in ~/.zshrc)
-[[ -f "$HOME/dots/zsh/functions/opencode-model.zsh" ]] \
-  && source "$HOME/dots/zsh/functions/opencode-model.zsh"
-
-# 3. Reload and use
-exec zsh
-# Press Alt+M → fzf picker, Enter runs `opencode --model <picked>`
-# Or without the keybinding: omodel --exec
-```
-
-The widget registers itself with:
-
-```zsh
-zle -N _omodel_widget
-bindkey '^[m' _omodel_widget
-bindkey '\em' _omodel_widget
-```
-
-(`^[m` / `\em` is Alt+M. In some terminals Alt+M arrives as `^[m` —
-if it does nothing, check `showkey -a` or remap your terminal's
-Meta/Alt key.)
-
-Once bound, it looks like this:
-
-![Alt+M picker showing top models with per-5h limits](assets/choose-your-top-models.png)
+Pairs with
+[`opencode-model-picker`](https://github.com/roquib/opencode-model-picker):
+an `Alt+M` fzf picker that reads this TOML. See that repo for the picker
+screenshot and zsh setup.
 
 ## Install
 
