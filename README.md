@@ -7,6 +7,15 @@ The snapshot lives at `~/.config/usages_limit/models.toml`, keyed by date
 (keeps the last 3 days). Each model entry carries the display `name` plus the
 authoritative `slug` (model ID) for use with `opencode -m opencode-go/<slug>`.
 
+## What this gives you
+
+An `Alt+M` model picker (reads `~/.config/usages_limit/models.toml`) that
+lists every Go-plan model with its 5h request budget and full
+`opencode-go/<slug>` ID, sorted highest-limit first — pick the strongest
+model you can afford before hitting a cap:
+
+![Alt+M picker showing top models with per-5h limits](assets/choose-your-top-models.png)
+
 ## Install
 
 ```bash
