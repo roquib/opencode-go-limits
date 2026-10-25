@@ -1,4 +1,4 @@
-# opencode-scraper
+# opencode-go-limits
 
 Scrapes [OpenCode Go](https://opencode.ai/docs/go/) model usage limits
 (requests per 5 hours / week / month) into a local TOML snapshot.
@@ -15,14 +15,14 @@ authoritative `slug` (model ID) for use with `opencode -m opencode-go/<slug>`.
 ./install.sh --verbose
 ```
 
-This builds the release binary, installs it to `~/.local/bin/opencode-scraper`,
-and adds an hourly cron job (logs to `~/.local/share/opencode-scraper.log`).
+This builds the release binary, installs it to `~/.local/bin/opencode-go-limits`,
+and adds an hourly cron job (logs to `~/.local/share/opencode-go-limits.log`).
 
 ## Usage
 
 ```bash
-opencode-scraper --once   # single scrape, then exit
-opencode-scraper          # scrape every hour (loop)
+opencode-go-limits --once   # single scrape, then exit
+opencode-go-limits          # scrape every hour (loop)
 ```
 
 Example output file (`~/.config/usages_limit/models.toml`):

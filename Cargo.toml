@@ -1,10 +1,10 @@
 [package]
-name = "opencode-scraper"
+name = "opencode-go-limits"
 version = "0.1.0"
 edition = "2021"
 description = "Scrapes OpenCode Go model usage limits into a local TOML snapshot"
 license = "MIT"
-repository = "https://github.com/roquib/opencode-scraper"
+repository = "https://github.com/roquib/opencode-go-limits"
 keywords = ["opencode", "scraper", "usage-limits"]
 categories = ["command-line-utilities"]
 
