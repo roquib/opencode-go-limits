@@ -17,7 +17,8 @@ model you can afford before hitting a cap.
 ### Set up Alt+M (zsh)
 
 This repo only writes the TOML. The picker is the companion binary
-`opencode-model-picker` plus a ZLE widget:
+[`opencode-model-picker`](https://github.com/roquib/opencode-model-picker)
+plus a ZLE widget:
 
 ```bash
 # 1. Picker binary reads the TOML via fzf — install it first
