@@ -9,11 +9,12 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ModelUsage {
     name: String,
-    /// opencode model id from the Endpoints table (e.g. "deepseek-v4-flash").
-    /// Prefix with "opencode-go/" for `opencode -m`. Falls back to a slugified
-    /// name when the Endpoints table has no matching row.
+    /// Authoritative opencode model id, taken from the console table's
+    /// `data-model` attribute (e.g. "deepseek-v4.1-flash").
+    /// Prefix with "opencode-go/" for `opencode -m`.
     #[serde(default)]
     slug: String,
+    /// Estimated requests per 5 hours for the selected plan.
     /// `None` means Unlimited for that window.
     #[serde(
         default,
@@ -21,18 +22,10 @@ struct ModelUsage {
         serialize_with = "ser_opt_limit"
     )]
     requests_per_5h: Option<u64>,
-    #[serde(
-        default,
-        deserialize_with = "de_opt_limit",
-        serialize_with = "ser_opt_limit"
-    )]
-    requests_per_week: Option<u64>,
-    #[serde(
-        default,
-        deserialize_with = "de_opt_limit",
-        serialize_with = "ser_opt_limit"
-    )]
-    requests_per_month: Option<u64>,
+    /// Monthly spend allowance for the selected plan, as published by the
+    /// console (e.g. "$15"). `None` when the plan is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    monthly_limit: Option<String>,
 }
 
 /// Serialize `Some(n)` as a TOML integer, `None` (unlimited) as `"Unlimited"`.
@@ -97,56 +90,6 @@ fn de_opt_limit<'de, D: serde::Deserializer<'de>>(
     d.deserialize_any(OptLimitVisitor)
 }
 
-/// "Muse Spark 1.3 Contributor" -> "muse-spark-1.3-contributor" (fallback only).
-/// Keeps dots since authoritative ids contain them (qwen3.8-flash,
-/// deepseek-v4.1-flash); collapses any other run of non-alphanumerics
-/// into a single hyphen.
-fn slugify(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut prev_dash = true; // trim leading separators
-    for c in name.to_lowercase().chars() {
-        if c.is_ascii_alphanumeric() || c == '.' {
-            out.push(c);
-            prev_dash = false;
-        } else if !prev_dash {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
-}
-
-/// Normalize a display name for cross-table lookup: the Endpoints table
-/// uses "MiMo V2.5" while the Estimated-requests table uses "MiMo-V2.5",
-/// and promo rows append suffixes ("DeepSeek V4.1 Flash4x · Ends Sep 20").
-/// Lowercase, drop promo suffix after '·', turn every non-alphanumeric
-/// run into one space, collapse whitespace.
-fn normalize_name(name: &str) -> String {
-    let base = name.split('·').next().unwrap_or(name);
-    base.to_lowercase()
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Look up the authoritative slug: exact normalized match first, then a
-/// prefix match so "deepseek v4 1 flash 4x" still resolves to the
-/// "deepseek v4 1 flash" endpoint row.
-fn lookup_slug(slugs: &BTreeMap<String, String>, name: &str) -> Option<String> {
-    let norm = normalize_name(name);
-    if let Some(id) = slugs.get(&norm) {
-        return Some(id.clone());
-    }
-    slugs
-        .iter()
-        .find(|(k, _)| norm.starts_with(k.as_str()))
-        .map(|(_, v)| v.clone())
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct UsageData {
     models: BTreeMap<String, Vec<ModelUsage>>,
@@ -194,123 +137,116 @@ fn parse_limit(s: &str) -> Result<Option<u64>> {
     best.map(Some).context(format!("No number found in: {s}"))
 }
 
-/// Parse the Endpoints table (columns: Model | Model ID | Endpoint | AI SDK
-/// Package) into a map of normalized display name -> model id slug.
-/// Keys are normalized so "MiMo V2.5" matches the "MiMo-V2.5" usage row.
-fn scrape_endpoints(document: &Html) -> BTreeMap<String, String> {
-    let table_selector = Selector::parse("table").expect("Invalid table selector");
-    let row_selector = Selector::parse("tr").expect("Invalid row selector");
-    let cell_selector = Selector::parse("td").expect("Invalid cell selector");
-    let th_selector = Selector::parse("th").expect("Invalid th selector");
+/// Plans exposed by the console table. Kept as an allow-list because the plan
+/// name is interpolated into a CSS selector.
+const PLANS: [&str; 2] = ["go", "go-plus"];
 
-    let mut map = BTreeMap::new();
-
-    for table in document.select(&table_selector) {
-        let headers: Vec<String> = table
-            .select(&th_selector)
-            .map(|h| h.text().collect::<String>().trim().to_string())
-            .collect();
-
-        if headers.contains(&"Model".to_string()) && headers.contains(&"Model ID".to_string()) {
-            for row in table.select(&row_selector) {
-                let cells: Vec<_> = row.select(&cell_selector).collect();
-                if cells.len() >= 2 {
-                    let name = cells[0].text().collect::<String>().trim().to_string();
-                    let id = cells[1].text().collect::<String>().trim().to_string();
-                    if !name.is_empty() && !id.is_empty() && name != "Model" {
-                        map.insert(normalize_name(&name), id);
-                    }
-                }
-            }
-        }
-    }
-
-    map
+/// Parse the console `Go` limits table.
+///
+/// The page renders one row per model, each carrying:
+/// - `data-model="<slug>"` — authoritative model id,
+/// - a `[data-layer="model-name"]` cell with the display name,
+/// - a `td[data-allowance-type="requests"]` cell with one
+///   `[data-plan="go"|"go-plus"] [data-layer="current-value"]` per plan,
+/// - a `td[data-allowance-type="usage"]` cell with the monthly $ limit
+///   per plan.
+///
+/// Only the requested plan's values are recorded.
+fn scrape_plan_value(row: &scraper::ElementRef, cell_sel: &Selector, plan: &str) -> Option<String> {
+    let cell = row.select(cell_sel).next()?;
+    let value_sel = Selector::parse(&format!(
+        "[data-plan=\"{plan}\"] [data-layer=\"current-value\"]"
+    ))
+    .ok()?;
+    let el = cell.select(&value_sel).next()?;
+    Some(cell_text(&el))
 }
 
-/// True when `headers` look like the Estimated-requests table:
-/// `Model | Requests per 5 hours | Requests per week | Requests per month`.
-/// Compared case-insensitively — the site uses "Requests per 5 hours".
-fn is_requests_table(headers: &[String]) -> bool {
-    headers.iter().any(|h| h == "Model")
-        && headers
-            .iter()
-            .any(|h| h.to_lowercase().contains("requests per 5 hour"))
-}
-
-fn scrape_usage_limits() -> Result<Vec<ModelUsage>> {
-    let url = "https://opencode.ai/docs/go/";
+fn scrape_usage_limits(plan: &str) -> Result<Vec<ModelUsage>> {
+    // The docs page no longer publishes the request table; it points at the
+    // console Go page instead (the `#limits` anchor is client-side only).
+    let url = "https://opencode.ai/console/go";
     let response = reqwest::blocking::get(url).context("Failed to fetch page")?;
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("{url} returned HTTP {status} (the console may require a login)");
+    }
 
     let html = response.text().context("Failed to read response")?;
     let document = Html::parse_document(&html);
 
-    // The Endpoints table maps each model's display name to its "Model ID"
-    // (the slug used by `opencode -m opencode-go/<id>`). Read it first so we can
-    // attach the authoritative slug to each usage row.
-    let slugs = scrape_endpoints(&document);
-
-    let table_selector = Selector::parse("table").expect("Invalid table selector");
-    let go_panel_table_selector =
-        Selector::parse("#go-requests-panel-go table").expect("Invalid panel selector");
-    let row_selector = Selector::parse("tr").expect("Invalid row selector");
-    let cell_selector = Selector::parse("td").expect("Invalid cell selector");
-    let th_selector = Selector::parse("th").expect("Invalid th selector");
-
-    // The page now renders one requests table per plan tab (`go` and
-    // `go-plus` with ~3x the limits). Only the `go` panel is ours — the
-    // generic `table` selector is just a fallback for older page layouts.
-    let panel_tables: Vec<_> = document.select(&go_panel_table_selector).collect();
-    let use_panel = !panel_tables.is_empty();
+    let row_selector = Selector::parse("tr[data-model]").expect("Invalid row selector");
+    let name_selector =
+        Selector::parse("[data-layer=\"model-name\"]").expect("Invalid name selector");
+    let requests_cell_selector = Selector::parse("td[data-allowance-type=\"requests\"]")
+        .expect("Invalid requests cell selector");
+    let usage_cell_selector =
+        Selector::parse("td[data-allowance-type=\"usage\"]").expect("Invalid usage cell selector");
 
     let mut models = Vec::new();
 
-    // Collect the table elements first: `document.select()` borrows the
-    // document, and panel scoping needs the borrow to end before the loop.
-    let table_html: Vec<String> = if use_panel {
-        panel_tables.iter().map(|t| t.html()).collect()
-    } else {
-        document.select(&table_selector).map(|t| t.html()).collect()
-    };
-
-    for html in &table_html {
-        let table = Html::parse_fragment(html);
-        let header_row = table.select(&th_selector).collect::<Vec<_>>();
-        if header_row.len() >= 4 {
-            let headers: Vec<String> = header_row
-                .iter()
-                .map(|h| h.text().collect::<String>().trim().to_string())
-                .collect();
-
-            if is_requests_table(&headers) {
-                for row in table.select(&row_selector) {
-                    let cells: Vec<_> = row.select(&cell_selector).collect();
-                    if cells.len() >= 4 {
-                        let name = cell_text(&cells[0]);
-                        let requests_5h = parse_limit(&cell_text(&cells[1]))?;
-                        let requests_week = parse_limit(&cell_text(&cells[2]))?;
-                        let requests_month = parse_limit(&cell_text(&cells[3]))?;
-
-                        if !name.is_empty() && name != "Model" {
-                            let slug = lookup_slug(&slugs, &name).unwrap_or_else(|| slugify(&name));
-                            models.push(ModelUsage {
-                                name,
-                                slug,
-                                requests_per_5h: requests_5h,
-                                requests_per_week: requests_week,
-                                requests_per_month: requests_month,
-                            });
-                        }
-                    }
-                }
-            }
+    for row in document.select(&row_selector) {
+        let slug = row
+            .value()
+            .attr("data-model")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if slug.is_empty() {
+            continue;
         }
+
+        // Display name: prefer the title attribute (full text), fall back to
+        // the cell's text, then to the slug.
+        let name = row
+            .select(&name_selector)
+            .next()
+            .map(|el| {
+                el.value()
+                    .attr("title")
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| cell_text(&el))
+            })
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| slug.clone());
+
+        let requests = scrape_plan_value(&row, &requests_cell_selector, plan);
+        let Some(requests) = requests else {
+            // Row without this plan's value (e.g. plan-specific model).
+            continue;
+        };
+        let requests_per_5h = parse_limit(&requests)?;
+
+        let monthly_limit = scrape_plan_value(&row, &usage_cell_selector, plan)
+            .filter(|v| !v.is_empty())
+            .filter(|v| !parse_is_unlimited(v));
+
+        models.push(ModelUsage {
+            name,
+            slug,
+            requests_per_5h,
+            monthly_limit,
+        });
+    }
+
+    if models.is_empty() {
+        anyhow::bail!(
+            "No models found on {url} for plan \"{plan}\" — the page layout may have changed"
+        );
     }
 
     // Unlimited (None) ranks highest so it sorts first.
     let key = |m: &ModelUsage| m.requests_per_5h.unwrap_or(u64::MAX);
     models.sort_by_key(|b| std::cmp::Reverse(key(b)));
     Ok(models)
+}
+
+/// True when a published limit cell means "no limit".
+fn parse_is_unlimited(s: &str) -> bool {
+    let lowered = s.trim().to_lowercase();
+    lowered.contains("unlimit") || lowered.contains('∞') || lowered.contains("infinity")
 }
 
 fn read_existing_data(path: &PathBuf) -> Result<UsageData> {
@@ -357,13 +293,56 @@ fn write_toml(models: Vec<ModelUsage>) -> Result<()> {
 use std::thread;
 use std::time::Duration;
 
+fn usage() -> &'static str {
+    "opencode-go-limits [--once] [--plan <go|go-plus>]
+
+  --once            scrape once and exit (default: loop hourly)
+  --plan <name>     which console plan to record (default: go)
+  -h, --help        show this help"
+}
+
+fn parse_args() -> (bool, String) {
+    let mut run_once = false;
+    let mut plan = "go".to_string();
+    let mut args = std::env::args().skip(1);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--once" => run_once = true,
+            "--plan" => match args.next() {
+                Some(value) if PLANS.contains(&value.as_str()) => plan = value,
+                Some(value) => {
+                    eprintln!(
+                        "❌ unknown plan \"{value}\" (expected one of: {})",
+                        PLANS.join(", ")
+                    );
+                    std::process::exit(2);
+                }
+                None => {
+                    eprintln!("❌ --plan needs a value (one of: {})", PLANS.join(", "));
+                    std::process::exit(2);
+                }
+            },
+            "-h" | "--help" => {
+                println!("{}", usage());
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("❌ unknown argument: {other}\n\n{}", usage());
+                std::process::exit(2);
+            }
+        }
+    }
+
+    (run_once, plan)
+}
+
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let run_once = args.contains(&"--once".to_string());
+    let (run_once, plan) = parse_args();
 
     loop {
-        println!("🔍 Scraping OpenCode AI usage limits...");
-        match scrape_usage_limits() {
+        println!("🔍 Scraping OpenCode AI usage limits (plan: {plan})...");
+        match scrape_usage_limits(&plan) {
             Ok(models) => {
                 println!("📊 Found {} models", models.len());
                 if let Err(e) = write_toml(models) {
@@ -416,23 +395,123 @@ mod tests {
             name: "X".into(),
             slug: "x".into(),
             requests_per_5h: None,
-            requests_per_week: Some(100),
-            requests_per_month: None,
+            monthly_limit: None,
         };
         let toml_str = toml::to_string_pretty(&m).unwrap();
         assert!(toml_str.contains("\"Unlimited\"") || toml_str.contains("Unlimited"));
+        // Unknown/unlimited monthly limit is omitted entirely.
+        assert!(!toml_str.contains("monthly_limit"));
         let back: ModelUsage = toml::from_str(&toml_str).unwrap();
         assert_eq!(back.requests_per_5h, None);
-        assert_eq!(back.requests_per_week, Some(100));
-        assert_eq!(back.requests_per_month, None);
+        assert_eq!(back.monthly_limit, None);
     }
 
     #[test]
     fn legacy_numeric_toml_still_parses() {
+        // Old snapshots also carry requests_per_week/month; unknown fields
+        // must be ignored rather than failing the whole file.
         let back: ModelUsage = toml::from_str(
             "name = \"X\"\nslug = \"x\"\nrequests_per_5h = 6500\nrequests_per_week = 100\nrequests_per_month = 1000\n",
         )
         .unwrap();
         assert_eq!(back.requests_per_5h, Some(6_500));
+        assert_eq!(back.monthly_limit, None);
+    }
+
+    #[test]
+    fn monthly_limit_is_kept_when_published() {
+        let m = ModelUsage {
+            name: "X".into(),
+            slug: "x".into(),
+            requests_per_5h: Some(98),
+            monthly_limit: Some("$15".into()),
+        };
+        let toml_str = toml::to_string_pretty(&m).unwrap();
+        assert!(toml_str.contains("monthly_limit = \"$15\""));
+        let back: ModelUsage = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.monthly_limit.as_deref(), Some("$15"));
+    }
+
+    /// The console layout this scraper targets: one row per model with
+    /// per-plan request/usage cells keyed by `data-plan`.
+    const CONSOLE_HTML: &str = r#"
+<table>
+  <tbody>
+    <tr data-model="kimi-k3">
+      <th><span data-layer="model-name" title="Kimi K3">Kimi K3</span></th>
+      <td data-allowance-type="requests">
+        <div data-layer="requests">
+          <span data-plan="go"><span data-layer="current-value">98</span></span>
+          <span data-plan="go-plus"><span data-layer="current-value">392</span></span>
+        </div>
+      </td>
+      <td data-allowance-type="usage">
+        <div data-layer="usage">
+          <span data-plan="go"><span data-layer="current-value">$15</span></span>
+          <span data-plan="go-plus"><span data-layer="current-value">$60</span></span>
+        </div>
+      </td>
+    </tr>
+    <tr data-model="beam-free">
+      <th><span data-layer="model-name" title="Beam Free">Beam Free</span></th>
+      <td data-allowance-type="requests">
+        <div data-layer="requests">
+          <span data-plan="go"><span data-layer="current-value">∞</span></span>
+          <span data-plan="go-plus"><span data-layer="current-value">∞</span></span>
+        </div>
+      </td>
+      <td data-allowance-type="usage">
+        <div data-layer="usage">
+          <span data-plan="go"><span data-layer="current-value">∞</span></span>
+          <span data-plan="go-plus"><span data-layer="current-value">∞</span></span>
+        </div>
+      </td>
+    </tr>
+  </tbody>
+</table>
+"#;
+
+    #[test]
+    fn parses_console_rows_for_go_plan() {
+        let doc = Html::parse_document(CONSOLE_HTML);
+        let row_selector = Selector::parse("tr[data-model]").unwrap();
+        let name_selector = Selector::parse("[data-layer=\"model-name\"]").unwrap();
+        let requests_cell = Selector::parse("td[data-allowance-type=\"requests\"]").unwrap();
+        let usage_cell = Selector::parse("td[data-allowance-type=\"usage\"]").unwrap();
+
+        let rows: Vec<_> = doc.select(&row_selector).collect();
+        assert_eq!(rows.len(), 2);
+
+        let kimi = &rows[0];
+        assert_eq!(kimi.value().attr("data-model"), Some("kimi-k3"));
+        assert_eq!(
+            kimi.select(&name_selector)
+                .next()
+                .unwrap()
+                .value()
+                .attr("title"),
+            Some("Kimi K3")
+        );
+        assert_eq!(
+            scrape_plan_value(kimi, &requests_cell, "go").as_deref(),
+            Some("98")
+        );
+        assert_eq!(
+            scrape_plan_value(kimi, &requests_cell, "go-plus").as_deref(),
+            Some("392")
+        );
+        assert_eq!(
+            scrape_plan_value(kimi, &usage_cell, "go").as_deref(),
+            Some("$15")
+        );
+
+        let beam = &rows[1];
+        assert_eq!(
+            parse_limit(&scrape_plan_value(beam, &requests_cell, "go").unwrap()).unwrap(),
+            None
+        );
+        assert!(parse_is_unlimited(
+            &scrape_plan_value(beam, &usage_cell, "go").unwrap()
+        ));
     }
 }
